@@ -11,9 +11,13 @@ pinned: false
 # Chess vs. The Fly Brain
 
 **🪰 Live: [fly-chess-brain.onrender.com](https://fly-chess-brain.onrender.com)**
-(free-tier hosting — sleeps after ~15min idle, first move after a wake can be
-slow; expect ~15-45s per move even once warm, this is a genuinely heavy
-simulation on shared CPU, not a bug)
+
+> **Not 24/7 always-on.** This runs on Render's free tier, which sleeps the
+> app after ~15min with no traffic to save resources. The link is permanent,
+> but if nobody's used it recently the first visit triggers a ~30-60s cold
+> start while it wakes back up - normal, not broken. Once warm, expect
+> ~15-45s per move regardless (this is a genuinely heavy simulation running
+> on shared free-tier CPU). A real always-on deploy would need a paid tier.
 
 Play chess against an opponent whose moves are chosen by real **DAN (reward)
 neuron** activity in a leaky integrate-and-fire (LIF) spiking simulation of
