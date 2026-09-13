@@ -58,6 +58,25 @@
   #candidates th:first-child, #candidates td:first-child { text-align: left; }
   #candidates tr.chosen { background: #1e2a3a; color: #7dd3fc; font-weight: 600; }
   #candidates thead th { color: #7a7a90; font-weight: 500; }
+
+  /* move-option dots (chess.com style): small filled dot for a quiet move,
+     hollow ring for a capture - appended as a child of the square div, which
+     chessboard.js already gives position:relative, so this needs no manual
+     coordinate math. */
+  .move-dot {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 32%; height: 32%; border-radius: 50%;
+    background: rgba(20, 20, 20, 0.35);
+    pointer-events: none; z-index: 1;
+  }
+  .move-dot.capture {
+    width: 86%; height: 86%; background: transparent;
+    border: 5px solid rgba(20, 20, 20, 0.35); box-sizing: border-box;
+  }
+  .selected-square::before {
+    content: ""; position: absolute; inset: 0;
+    background: rgba(255, 215, 0, 0.35); pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -116,10 +135,39 @@
       statusEl.className = "status" + (cls ? " " + cls : "");
     }
 
+    let selectedSquare = null;
+
+    function squareEl(square) {
+      return document.querySelector(`#board [data-square="${square}"]`);
+    }
+
+    function clearMoveDots() {
+      document.querySelectorAll("#board .move-dot").forEach(el => el.remove());
+      document.querySelectorAll("#board .selected-square").forEach(el => el.classList.remove("selected-square"));
+      selectedSquare = null;
+    }
+
+    function showMoveDots(square) {
+      clearMoveDots();
+      const moves = game.moves({ square, verbose: true });
+      if (moves.length === 0) return;
+      selectedSquare = square;
+      const from = squareEl(square);
+      if (from) from.classList.add("selected-square");
+      for (const m of moves) {
+        const target = squareEl(m.to);
+        if (!target) continue;
+        const dot = document.createElement("div");
+        dot.className = "move-dot" + (m.flags.includes("c") || m.flags.includes("e") ? " capture" : "");
+        target.insertBefore(dot, target.firstChild);
+      }
+    }
+
     function onDragStart(source, piece) {
       if (game.game_over()) return false;
       if (game.turn() !== "w") return false; // only let the human move White
       if (piece.search(/^b/) !== -1) return false;
+      showMoveDots(source); // chess.com shows move dots as soon as you pick up a piece
     }
 
     function checkGameOver() {
@@ -246,18 +294,55 @@
       }
     }
 
-    function onDrop(source, target) {
+    function playHumanMove(source, target) {
       const move = game.move({ from: source, to: target, promotion: "q" });
-      if (move === null) return "snapback";
+      if (move === null) return false;
       log(`you played ${move.san}`);
       board.position(game.fen());
-      if (checkGameOver()) return;
-      setTimeout(requestFlyMove, 250);
+      if (!checkGameOver()) setTimeout(requestFlyMove, 250);
+      return true;
+    }
+
+    function onDrop(source, target) {
+      clearMoveDots();
+      if (!playHumanMove(source, target)) return "snapback";
     }
 
     function onSnapEnd() {
       board.position(game.fen());
     }
+
+    // Click-to-move: click a piece to see its dots, click a dot square to play
+    // it - alongside drag-and-drop, matching chess.com's click-or-drag flow.
+    document.getElementById("board").addEventListener("click", (e) => {
+      const squareDiv = e.target.closest("[data-square]");
+      if (!squareDiv) return;
+      const square = squareDiv.getAttribute("data-square");
+
+      if (selectedSquare && selectedSquare !== square) {
+        const isLegalTarget = game.moves({ square: selectedSquare, verbose: true })
+          .some(m => m.to === square);
+        if (isLegalTarget) {
+          const from = selectedSquare;
+          clearMoveDots();
+          playHumanMove(from, square);
+          return;
+        }
+      }
+
+      if (selectedSquare === square) {
+        clearMoveDots();
+        return;
+      }
+
+      if (game.game_over() || game.turn() !== "w") return;
+      const piece = game.get(square);
+      if (piece && piece.color === "w") {
+        showMoveDots(square);
+      } else {
+        clearMoveDots();
+      }
+    });
 
     board = Chessboard("board", {
       draggable: true,
@@ -271,6 +356,7 @@
     document.getElementById("reset").addEventListener("click", () => {
       game.reset();
       board.position("start");
+      clearMoveDots();
       logEl.innerHTML = "";
       resetThinklog();
       thinklogEl.textContent = "Waiting for a move…";
