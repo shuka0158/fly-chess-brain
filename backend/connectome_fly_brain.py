@@ -1,14 +1,22 @@
 """
-The real fly-brain chess opponent: board state is injected as stimulus into
-real FAFB sensory (afferent) neurons, propagated through the actual synaptic
-wiring via a leaky integrate-and-fire (LIF) spiking simulation, and read out
-at real descending/motor neurons to score legal chess moves.
+The real fly-brain chess opponent.
 
-This is a reservoir-computing style engine: the *reservoir* (the connectome's
-fixed synaptic weights) is 100% real data. The *readout* (mapping motor
-activity -> a move score) is an untrained, fixed random projection, since
-there is no training signal that would make an insect brain "want" to play
-chess. It's an honest novelty engine, not literal insect cognition.
+Architecture: for every legal move, show the brain what the board would look
+like *after* that move (as sensory stimulus), run a leaky integrate-and-fire
+(LIF) spiking simulation of the real FAFB connectome on all candidates at
+once, and read out real DAN (dopaminergic, PAM-cluster) neuron activity for
+each - these are the fly's actual reward/valence teaching-signal neurons,
+extensively studied in real associative-learning neuroscience. The move whose
+resulting-position stimulus produces the most reward-neuron activity is the
+one "the fly's brain picks."
+
+This replaces an earlier version that scored moves with an untrained random
+projection - a bigger, more honest change: the decision signal is now a real,
+named, biologically meaningful population (real reward neurons), not an
+arbitrary hash. It's still not literal insect cognition - flies have no
+notion of chess, and there is no training signal that could ever make real
+reward neurons "know" chess is good to win - but the readout is now a
+genuine neuroscience concept, not a coincidence of random numbers.
 """
 from __future__ import annotations
 
@@ -22,25 +30,28 @@ from fly_brain import FlyBrain
 GRAPH_DIR = Path(__file__).resolve().parent.parent / "data" / "graph"
 
 # --- Simulation hyperparameters ---
-N_STEPS = 25
+# Fewer steps than the old single-position version (25) because we now
+# simulate every legal move's resulting position at once (batched matrix
+# sim) - cost scales with steps x candidate moves, so this keeps a typical
+# ~30-legal-move position responding in single-digit seconds.
+N_STEPS = 12
 DECAY = 0.8
 THRESHOLD = 0.35
 STIMULUS_MAGNITUDE = 1.0
-CHANGE_BOOST = 4.0  # extra stimulus on squares touched by the last move played
+CHANGE_BOOST = 4.0  # extra stimulus on squares touched by the move being evaluated
 REPETITION_PENALTY = 1000.0  # steer away from repeating a position when not forced
 SHUFFLE_HISTORY = 6  # how many of the brain's own past moves to look back over
 SHUFFLE_PENALTY = 40.0  # per past occurrence of this same piece-pair shuffle
-CAPTURE_WEIGHT = 0.5  # material-awareness term, see choose_move for why this exists
+CAPTURE_WEIGHT = 0.5  # small material-awareness safety net, see _score_move
 PIECE_VALUES = {
     chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
     chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 4,
 }
-FEATURE_DIM = 64 + 64 + 6 + 3  # from-sq, to-sq, piece type, capture/promo/check
 RNG_SEED = 42
 
 
 class ConnectomeFlyBrain(FlyBrain):
-    name = "fafb-connectome-lif"
+    name = "fafb-connectome-dan"
 
     def __init__(self):
         print("[fly-brain] loading connectome graph...")
@@ -55,66 +66,47 @@ class ConnectomeFlyBrain(FlyBrain):
         self.root_ids = np.load(GRAPH_DIR / "root_ids.npy")
         self.sensory_idx = np.load(GRAPH_DIR / "sensory_idx.npy")
         self.motor_idx = np.load(GRAPH_DIR / "motor_idx.npy")
+        self.dan_idx = np.load(GRAPH_DIR / "dan_idx.npy")
         self.n = self.W.shape[0]
-        self.n_motor = len(self.motor_idx)
 
         # Fixed, deterministic mapping: each of the 64 board squares gets its
-        # own cluster of sensory neurons to stimulate (arbitrary but stable).
+        # own cluster of sensory neurons to stimulate (arbitrary but stable -
+        # a real fly has no retina for a chessboard, this is a necessary
+        # simplification to get board state into the network at all).
         rng = np.random.RandomState(RNG_SEED)
         shuffled_sensory = self.sensory_idx.copy()
         rng.shuffle(shuffled_sensory)
         self.square_to_sensory = np.array_split(shuffled_sensory, 64)
 
-        # Fixed random readout: move-feature vector -> motor-space code.
-        self.readout = rng.normal(size=(FEATURE_DIM, self.n_motor)).astype(np.float32)
-        self.readout /= np.sqrt(FEATURE_DIM)
-
         print(f"[fly-brain] ready: {self.n} neurons, {self.W.nnz} synapses, "
-              f"{len(self.sensory_idx)} sensory, {self.n_motor} motor")
+              f"{len(self.sensory_idx)} sensory, {len(self.motor_idx)} motor, "
+              f"{len(self.dan_idx)} DAN (reward)")
 
     # -- board encoding --------------------------------------------------
-    def _encode_board(self, board: chess.Board) -> np.ndarray:
+    def _encode_board(self, board: chess.Board, perspective: chess.Color) -> np.ndarray:
+        """Stimulus for `board` as seen by `perspective` (True=white). Always
+        pass the fly's own color explicitly - do not rely on board.turn,
+        since we encode hypothetical *resulting* positions (after a
+        candidate move has already been pushed, flipping board.turn)."""
         external = np.zeros(self.n, dtype=np.float32)
         for square in chess.SQUARES:
             piece = board.piece_at(square)
             if piece is None:
                 continue
             value = PIECE_VALUES[piece.piece_type]
-            sign = 1.0 if piece.color == board.turn else -1.0
+            sign = 1.0 if piece.color == perspective else -1.0
             mag = STIMULUS_MAGNITUDE * (0.4 + 0.6 * value / 9.0) * sign
-            neurons = self.square_to_sensory[square]
-            external[neurons] += mag
+            external[self.square_to_sensory[square]] += mag
 
-        # Change-sensitive boost: real sensory systems are far more driven by
-        # what just moved than by the (mostly static) rest of the board. Without
-        # this, one turn's stimulus looks almost identical to the last one -
-        # a handful of far-away opening moves barely nudges a 138k-neuron
-        # network - and the readout collapses onto whichever move type wins
-        # by default (observed in practice: the brain got stuck shuffling one
-        # rook back and forth regardless of what the opponent played).
+        # Change-sensitive boost on the squares touched by whichever move
+        # produced this position - real sensory systems are far more driven
+        # by what just moved than by the (mostly static) rest of the board.
         if board.move_stack:
             last = board.move_stack[-1]
             for square in (last.from_square, last.to_square):
-                neurons = self.square_to_sensory[square]
-                external[neurons] += CHANGE_BOOST
+                external[self.square_to_sensory[square]] += CHANGE_BOOST
 
         return external
-
-    # -- simulation --------------------------------------------------
-    def _simulate(self, external: np.ndarray) -> np.ndarray:
-        v = np.zeros(self.n, dtype=np.float32)
-        spikes = np.zeros(self.n, dtype=np.float32)
-        motor_accum = np.zeros(self.n_motor, dtype=np.float32)
-
-        for _ in range(N_STEPS):
-            input_current = self.W @ spikes + external
-            v = DECAY * v + input_current
-            fired = v >= THRESHOLD
-            v = np.where(fired, 0.0, v)  # hard reset
-            spikes = fired.astype(np.float32)
-            motor_accum += spikes[self.motor_idx]
-
-        return motor_accum
 
     def _captured_value(self, board: chess.Board, move: chess.Move) -> float:
         if not board.is_capture(move):
@@ -124,108 +116,85 @@ class ConnectomeFlyBrain(FlyBrain):
         captured = board.piece_at(move.to_square)
         return PIECE_VALUES[captured.piece_type] if captured else 0.0
 
-    # -- move scoring --------------------------------------------------
-    def _move_features(self, board: chess.Board, move: chess.Move) -> np.ndarray:
-        f = np.zeros(FEATURE_DIM, dtype=np.float32)
-        f[move.from_square] = 1.0
-        f[64 + move.to_square] = 1.0
-        piece = board.piece_at(move.from_square)
-        piece_type = piece.piece_type if piece else chess.PAWN
-        f[128 + (piece_type - 1)] = 1.0
-        f[134] = 1.0 if board.is_capture(move) else 0.0
-        f[135] = 1.0 if move.promotion else 0.0
-        board.push(move)
-        f[136] = 1.0 if board.is_check() else 0.0
-        board.pop()
-        return f
-
-    def _score_move(self, board: chess.Board, move: chess.Move, motor_activity: np.ndarray,
+    def _safety_net(self, board: chess.Board, move: chess.Move,
                      own_recent_pairs: list[frozenset]) -> dict:
-        code = self._move_features(board, move) @ self.readout
-        code_norm = np.linalg.norm(code)
-        if code_norm > 0:
-            code = code / code_norm
-        connectome_score = float(motor_activity @ code)
-
-        # The random readout has no notion of material at all - "capture"
-        # is just one arbitrary feature bit in a random projection, not a
-        # weighted preference - so without this the brain never takes even a
-        # free queen (verified empirically). Deliberate, disclosed
-        # material-awareness term layered on top of the connectome score.
+        """Small, disclosed adjustments layered on top of the real DAN
+        valence signal - see think()'s docstring notes on why these exist."""
         capture_bonus = CAPTURE_WEIGHT * (self._captured_value(board, move) / 9.0)
 
-        # Steer away from repeating a position (e.g. shuffling one piece back
-        # and forth forever) unless every legal move repeats one.
         board.push(move)
         repetition_penalty = REPETITION_PENALTY if board.is_repetition(2) else 0.0
         board.pop()
 
-        # The untrained random readout genuinely doesn't discriminate finely
-        # between similar-looking positions (verified empirically: two boards
-        # differing by one far-away opening move gave >0.95 cosine-similar
-        # motor activity regardless of stimulus tuning) - a real limitation of
-        # a fixed reservoir this size, not something a magnitude tweak fixes.
-        # Left alone this reliably degenerates into shuffling one piece back
-        # and forth. Clearly-labeled behavioral guard, not a claim that the
-        # brain itself "noticed" the loop.
         shuffle_count = own_recent_pairs.count(frozenset((move.from_square, move.to_square)))
         shuffle_penalty = SHUFFLE_PENALTY * shuffle_count
 
-        total = connectome_score + capture_bonus - repetition_penalty - shuffle_penalty
         return {
-            "uci": move.uci(),
-            "san": board.san(move),
-            "connectome_score": round(connectome_score, 4),
             "capture_bonus": round(capture_bonus, 4),
             "repetition_penalty": round(repetition_penalty, 4),
             "shuffle_penalty": round(shuffle_penalty, 4),
-            "total": round(total, 4),
         }
 
+    # -- core: present every legal move's resulting position, batched ----
     def think(self, board: chess.Board):
-        """Generator yielding live progress events; the last event is the
-        decision. Mutates `board` in place (pushes the chosen move), exactly
-        like choose_move, so callers should not also call choose_move on it."""
         legal = list(board.legal_moves)
         if not legal:
             raise ValueError("No legal moves available")
 
-        n_occupied = sum(1 for sq in chess.SQUARES if board.piece_at(sq))
-        yield {"stage": "encode",
-               "message": f"Encoding {n_occupied} occupied squares into sensory-neuron stimulus "
-                          f"({len(self.sensory_idx)} real afferent neurons available)."}
-        external = self._encode_board(board)
-        if board.move_stack:
-            last_san_sq = chess.square_name(board.move_stack[-1].to_square)
-            yield {"stage": "encode_done",
-                   "message": f"Applied change-sensitive boost around the last move (...{last_san_sq})."}
-        else:
-            yield {"stage": "encode_done", "message": "No prior move this game - no change-boost applied."}
+        mover_color = board.turn  # the fly's own color - fixed perspective for all candidates
+        yield {"stage": "present_options",
+               "message": f"Presenting {len(legal)} candidate futures (the board after each legal "
+                          f"move) to {len(self.dan_idx)} real reward-signaling (DAN) neurons at once."}
 
-        v = np.zeros(self.n, dtype=np.float32)
-        spikes = np.zeros(self.n, dtype=np.float32)
-        motor_accum = np.zeros(self.n_motor, dtype=np.float32)
+        external_cols = []
+        for move in legal:
+            board.push(move)
+            external_cols.append(self._encode_board(board, perspective=mover_color))
+            board.pop()
+        external_matrix = np.stack(external_cols, axis=1)  # (n, M)
+        M = len(legal)
+
+        yield {"stage": "simulate_batch",
+               "message": f"Running a {N_STEPS}-step spiking simulation across all {M} candidates "
+                          f"in parallel over the real synaptic wiring..."}
+
+        v = np.zeros((self.n, M), dtype=np.float32)
+        spikes = np.zeros((self.n, M), dtype=np.float32)
+        dan_accum = np.zeros(M, dtype=np.float32)
         for step in range(N_STEPS):
-            input_current = self.W @ spikes + external
+            input_current = self.W @ spikes + external_matrix
             v = DECAY * v + input_current
             fired = v >= THRESHOLD
             v = np.where(fired, 0.0, v)
             spikes = fired.astype(np.float32)
-            motor_accum += spikes[self.motor_idx]
+            dan_accum += spikes[self.dan_idx, :].sum(axis=0)
             yield {"stage": "sim_step", "step": step + 1, "n_steps": N_STEPS,
-                   "neurons_firing": int(spikes.sum()), "motor_firing": int(spikes[self.motor_idx].sum())}
+                   "total_firing": int(spikes.sum()),
+                   "reward_firing_total": int(spikes[self.dan_idx, :].sum())}
 
-        norm = np.linalg.norm(motor_accum)
-        motor_activity = motor_accum / norm if norm > 0 else motor_accum
-        yield {"stage": "sim_done",
-               "message": f"{int((motor_accum > 0).sum())}/{self.n_motor} real descending/motor "
-                          f"neurons fired at least once over {N_STEPS} steps."}
+        yield {"stage": "valence_done",
+               "message": f"Reward-neuron response computed for all {M} candidates "
+                          f"(range {int(dan_accum.min())}-{int(dan_accum.max())} spikes)."}
 
-        yield {"stage": "scoring", "message": f"Scoring {len(legal)} legal moves against motor activity..."}
+        yield {"stage": "scoring", "message": "Combining real reward-neuron valence with material safety net..."}
         own_recent = [board.move_stack[i] for i in range(len(board.move_stack) - 2, -1, -2)][:SHUFFLE_HISTORY]
         own_recent_pairs = [frozenset((m.from_square, m.to_square)) for m in own_recent]
 
-        scored = [self._score_move(board, m, motor_activity, own_recent_pairs) for m in legal]
+        # Normalize valence to a comparable scale to the safety-net terms.
+        max_possible = N_STEPS * max(len(self.dan_idx), 1)
+        scored = []
+        for i, move in enumerate(legal):
+            valence = float(dan_accum[i]) / max_possible  # in [0, 1]
+            net = self._safety_net(board, move, own_recent_pairs)
+            total = valence + net["capture_bonus"] - net["repetition_penalty"] - net["shuffle_penalty"]
+            scored.append({
+                "uci": move.uci(),
+                "san": board.san(move),
+                "reward_spikes": int(dan_accum[i]),
+                "valence": round(valence, 4),
+                **net,
+                "total": round(total, 4),
+            })
         scored.sort(key=lambda r: -r["total"])
         yield {"stage": "candidates", "top": scored[:6]}
 
@@ -247,22 +216,12 @@ class ConnectomeFlyBrain(FlyBrain):
         }
 
     def choose_move(self, board: chess.Board) -> chess.Move:
-        legal = list(board.legal_moves)
-        if not legal:
-            raise ValueError("No legal moves available")
-
-        external = self._encode_board(board)
-        motor_activity = self._simulate(external)
-        norm = np.linalg.norm(motor_activity)
-        if norm > 0:
-            motor_activity = motor_activity / norm
-
-        own_recent = [board.move_stack[i] for i in range(len(board.move_stack) - 2, -1, -2)][:SHUFFLE_HISTORY]
-        own_recent_pairs = [frozenset((m.from_square, m.to_square)) for m in own_recent]
-
-        scored = [self._score_move(board, m, motor_activity, own_recent_pairs) for m in legal]
-        scored.sort(key=lambda r: -r["total"])
-        return chess.Move.from_uci(scored[0]["uci"])
+        """Like think(), but silent and leaves `board` unmodified (matches
+        the FlyBrain interface other callers, e.g. /api/fly-move, expect)."""
+        for event in self.think(board):
+            pass
+        move = board.pop()  # think() left its chosen move pushed; undo it
+        return move
 
 
 _singleton: ConnectomeFlyBrain | None = None

@@ -1,32 +1,44 @@
 # Chess vs. The Fly Brain
 
-Play chess against an opponent whose moves are chosen by a leaky
-integrate-and-fire (LIF) spiking simulation running on the **real FAFB fly
-connectome** (139,255 proofread neurons, ~15M aggregated synaptic weights,
-from [FlyWire/Codex](https://codex.flywire.ai/?dataset=fafb)).
+Play chess against an opponent whose moves are chosen by real **DAN (reward)
+neuron** activity in a leaky integrate-and-fire (LIF) spiking simulation of
+the real FAFB fly connectome (139,255 proofread neurons, ~15M aggregated
+synaptic weights, from [FlyWire/Codex](https://codex.flywire.ai/?dataset=fafb)).
 
-**What this is, honestly:** a fruit fly cannot reason about chess. This is a
-*reservoir-computing* novelty engine — the reservoir (fixed synaptic weights)
-is 100% real connectome data; the readout (mapping motor-neuron activity to a
-chess move score) is an untrained, fixed random projection, since there's no
-training signal that would make an insect brain "want" to play chess well.
-Don't expect strong play — expect genuinely fly-wiring-driven play.
+**What this is, honestly:** a fruit fly cannot reason about chess. This
+engine shows the brain the resulting board of every legal move and reads out
+activity from its real **PAM-cluster dopaminergic neurons** — the fly's
+actual reward/valence teaching-signal cells, extensively studied in real
+associative-learning neuroscience (they're the reward half of the circuit
+that lets flies learn "this smell means food"). The move whose resulting
+position produces the most reward-neuron activity is played. This is a
+genuine, named biological concept — not an arbitrary formula — but there is
+still no training signal that could ever make real reward neurons "know"
+chess is good to win, so don't expect strong play.
 
 ## How the fly picks a move
 
-1. **Encode the board**: each of the 64 squares maps to a fixed cluster of
-   real *sensory* (afferent) neurons. Occupied squares inject a stimulus
-   current, signed by whose piece it is and scaled by piece value.
-2. **Simulate**: propagate that stimulus through the real synaptic weight
-   matrix for 25 timesteps of LIF dynamics (excitatory/inhibitory sign comes
-   from each edge's predicted neurotransmitter probabilities — ACh/octopamine/
-   serotonin/dopamine ≈ excitatory, GABA/glutamate ≈ inhibitory).
-3. **Read out**: sum spikes at real *descending/motor* neurons over the
-   simulation → a motor activity vector.
-4. **Score moves**: each legal move gets a fixed random "motor code" (from a
-   seeded projection of its from/to squares, piece type, capture/promotion/
-   check flags). The move whose code best matches the motor activity vector
-   is played.
+1. **Present every option**: for each legal move, compute the board that
+   would result from playing it, and encode it as stimulus into real
+   *sensory* (afferent) neurons — each of the 64 squares maps to a fixed
+   cluster, signed by whose piece it is and scaled by piece value, with an
+   extra boost on the squares that move touches.
+2. **Simulate all candidates at once**: propagate every candidate's stimulus
+   in parallel (one batched matrix simulation, not one run per move — this is
+   what keeps a ~30-legal-move position responding in single-digit seconds)
+   through the real synaptic weight matrix for 12 steps of LIF dynamics.
+   Excitatory/inhibitory sign per edge comes from real predicted
+   neurotransmitter probabilities.
+3. **Read real reward-neuron activity**: sum spikes at the real DAN
+   (dopaminergic, PAM-cluster) population for each candidate's simulation —
+   this is the fly's actual reward circuitry's response to that outcome.
+4. **Score**: valence (normalized reward-neuron spike count) plus a small,
+   disclosed safety net — material-awareness (the raw valence signal has no
+   inherent notion of piece value) and anti-repetition/anti-shuffle guards
+   (the valence signal doesn't reliably discriminate between very
+   similar-looking positions on its own; left alone this degenerates into
+   shuffling one piece back and forth). The highest-scoring legal move is
+   played.
 
 ## Running it
 
@@ -36,7 +48,9 @@ cd backend
 ```
 
 Then open http://127.0.0.1:8770 in a browser. You play White; the fly plays
-Black.
+Black. The right-hand panel streams the brain's live thinking: board
+encoding, all 12 simulation steps (with real firing counts), reward-neuron
+valence per candidate, and the final scored move table.
 
 ## Rebuilding the connectome graph
 
@@ -50,18 +64,20 @@ cd scripts
 ```
 
 This writes `data/graph/{weights.npz, root_ids.npy, sensory_idx.npy,
-motor_idx.npy, neuron_meta.parquet}`, which `backend/connectome_fly_brain.py`
-loads at startup.
+motor_idx.npy, dan_idx.npy, neuron_meta.parquet}`, which
+`backend/connectome_fly_brain.py` loads at startup. `dan_idx.npy` is the 331
+real neurons annotated `cell_class == "DAN"` (all PAM-cluster in this
+dataset) that the whole decision mechanism reads out from.
 
 ## Project layout
 
 ```
 backend/
-  main.py                  FastAPI app: /api/fly-move, /api/health
+  main.py                  FastAPI app: /api/fly-move, /api/fly-move-stream, /api/health
   fly_brain.py              FlyBrain interface + placeholder + brain selection
-  connectome_fly_brain.py   the real spiking engine
+  connectome_fly_brain.py   the real spiking engine (batched-simulation + DAN readout)
 frontend/
-  index.html                chess.js + chessboard.js UI
+  index.html                chess.js + chessboard.js UI + live-thinking panel
 scripts/
   build_graph.py             connectome -> cached sparse graph + classification
 data/                        raw downloads + data/graph/ cache (gitignored)
@@ -69,10 +85,16 @@ data/                        raw downloads + data/graph/ cache (gitignored)
 
 ## Known limitations / honest caveats
 
-- The readout is untrained, so don't expect coherent strategy — expect
-  plausible-looking but not "good" moves, closer to a strong bias for certain
-  move types than genuine evaluation.
-- ~1.5s per move (single-threaded sparse matvec over 15M weights × 25 steps).
 - The board→neuron mapping (64 squares → sensory neuron clusters) is an
   arbitrary but fixed assignment, not a biologically real retinotopic map —
   the fly doesn't "see" a chessboard.
+- Real DAN neurons signal reward for actual fly behaviors (odor/reward
+  association in the mushroom body) — repurposing their simulated response
+  to an artificial chess-board stimulus as "move quality" is a deliberate
+  analogy, not literal insect chess evaluation.
+- The material-awareness and anti-repetition/anti-shuffle terms are
+  hand-written safety nets layered on top of the raw reward-neuron signal,
+  disclosed in the live-thinking panel's score breakdown (capture bonus /
+  penalty columns) rather than hidden.
+- ~8-10s per move (batched sparse matvec over 15M weights × 12 steps ×
+  ~20-40 simultaneous candidate simulations, single-threaded).

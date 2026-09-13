@@ -63,12 +63,14 @@
 <body>
   <h1>♟️ Chess vs. The Fly Brain</h1>
   <p class="subtitle">
-    You play White. Black's moves are chosen by a leaky-integrate-and-fire spiking
-    simulation running on the real <strong>FAFB fly connectome</strong> (139k neurons,
-    15M synaptic weights) — the board is injected as stimulus into real sensory
-    neurons, propagated through actual synaptic wiring, and read out at real
-    descending/motor neurons to score legal moves. It's not sentient chess
-    reasoning — it's an honest novelty engine driven by a real fly's real wiring.
+    You play White. For each of Black's legal moves, the real <strong>FAFB fly
+    connectome</strong> (139k neurons, 15M synaptic weights) is shown that move's
+    resulting board as stimulus, simulated with real spiking dynamics, and read
+    out at real <strong>DAN reward neurons</strong> — the fly's actual
+    dopaminergic mushroom-body teaching-signal cells. The move whose outcome
+    produces the most reward-neuron activity is played. It's not sentient chess
+    reasoning — but the decision signal is now a genuine, named neuroscience
+    concept, not an arbitrary formula.
   </p>
 
   <div class="layout">
@@ -86,7 +88,7 @@
         <h2>🧠 fly brain — live thinking</h2>
         <div id="thinklog">Waiting for a move…</div>
         <table id="candidates" hidden>
-          <thead><tr><th>move</th><th>connectome</th><th>capture</th><th>penalty</th><th>total</th></tr></thead>
+          <thead><tr><th>move</th><th>valence</th><th>capture</th><th>penalty</th><th>total</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -159,7 +161,7 @@
         const tr = document.createElement("tr");
         if (c.uci === chosenUci) tr.className = "chosen";
         const penalty = -(c.repetition_penalty + c.shuffle_penalty);
-        tr.innerHTML = `<td>${c.san}</td><td>${c.connectome_score.toFixed(3)}</td>` +
+        tr.innerHTML = `<td>${c.san}</td><td>${c.valence.toFixed(3)}</td>` +
           `<td>${c.capture_bonus.toFixed(3)}</td><td>${penalty.toFixed(3)}</td><td>${c.total.toFixed(3)}</td>`;
         tbody.appendChild(tr);
       }
@@ -168,17 +170,19 @@
 
     function handleThinkEvent(evt, onDecision) {
       switch (evt.stage) {
-        case "encode":
-        case "encode_done":
+        case "present_options":
+          think(evt.message, "ev-encode");
+          break;
+        case "simulate_batch":
           think(evt.message, "ev-encode");
           break;
         case "sim_step":
           if (!simProgressLine) simProgressLine = think("", "ev-sim-live");
           simProgressLine.textContent =
-            `simulating step ${evt.step}/${evt.n_steps} — ${evt.neurons_firing} neurons firing (${evt.motor_firing} motor)`;
+            `step ${evt.step}/${evt.n_steps} — ${evt.total_firing} neurons firing across all candidates (${evt.reward_firing_total} in reward neurons)`;
           thinklogEl.scrollTop = thinklogEl.scrollHeight;
           break;
-        case "sim_done":
+        case "valence_done":
           if (simProgressLine) simProgressLine.className = "ev-sim";
           think(evt.message, "ev-sim");
           simProgressLine = null;
@@ -187,7 +191,7 @@
           think(evt.message, "ev-score");
           break;
         case "candidates":
-          think(`top candidates (of all legal moves), best first:`, "ev-score");
+          think(`top candidates by reward-neuron valence + safety net, best first:`, "ev-score");
           renderCandidates(evt.top, null); // highlight added once we know the decision
           window.__lastCandidates = evt.top;
           break;

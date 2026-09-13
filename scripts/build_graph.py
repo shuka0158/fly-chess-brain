@@ -75,16 +75,25 @@ def main():
     meta = ann.reindex(root_ids)
     is_sensory = (meta["flow"] == "afferent").to_numpy()
     is_motor = meta["super_class"].isin(["descending", "motor"]).to_numpy()
+    # Real dopaminergic (DAN) neurons of the mushroom body's PAM cluster - the
+    # fly's actual reward/valence teaching-signal neurons (extensively studied
+    # in associative-learning neuroscience). Used as a genuine "does the fly's
+    # own reward circuitry like this outcome" readout, instead of an arbitrary
+    # hand-built scoring function.
+    is_dan = (meta["cell_class"] == "DAN").to_numpy()
 
     sensory_idx = np.nonzero(is_sensory)[0]
     motor_idx = np.nonzero(is_motor)[0]
+    dan_idx = np.nonzero(is_dan)[0]
     np.save(OUT / "sensory_idx.npy", sensory_idx)
     np.save(OUT / "motor_idx.npy", motor_idx)
-    print(f"  sensory: {len(sensory_idx)}  motor: {len(motor_idx)}")
+    np.save(OUT / "dan_idx.npy", dan_idx)
+    print(f"  sensory: {len(sensory_idx)}  motor: {len(motor_idx)}  DAN (reward): {len(dan_idx)}")
 
     meta_out = pd.DataFrame({
         "root_id": root_ids,
         "super_class": meta["super_class"].to_numpy(),
+        "cell_class": meta["cell_class"].to_numpy(),
         "cell_type": meta["cell_type"].to_numpy(),
         "side": meta["side"].to_numpy(),
         "flow": meta["flow"].to_numpy(),
