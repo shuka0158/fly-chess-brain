@@ -1,0 +1,4 @@
+data/graph/weights.npz filter=lfs diff=lfs merge=lfs -text
+data/graph/*.npy filter=lfs diff=lfs merge=lfs -text
+data/graph/*.npz filter=lfs diff=lfs merge=lfs -text
+data/graph/*.parquet filter=lfs diff=lfs merge=lfs -text

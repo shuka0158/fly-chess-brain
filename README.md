@@ -1,3 +1,13 @@
+---
+title: Chess vs The Fly Brain
+emoji: 🪰
+colorFrom: purple
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Chess vs. The Fly Brain
 
 Play chess against an opponent whose moves are chosen by real **DAN (reward)
