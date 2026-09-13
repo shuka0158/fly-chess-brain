@@ -92,10 +92,11 @@
     async function requestFlyMove() {
       setStatus("🪰 the fly is thinking&hellip;", "thinking");
       try {
+        const moves = game.history({ verbose: true }).map(m => m.from + m.to + (m.promotion || ""));
         const res = await fetch(API_BASE + "/api/fly-move", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fen: game.fen() }),
+          body: JSON.stringify({ fen: game.fen(), moves }),
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
@@ -133,7 +134,7 @@
       onDragStart,
       onDrop,
       onSnapEnd,
-      pieceTheme: "https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/img/chesspieces/wikipedia/{piece}.png",
+      pieceTheme: "/img/chesspieces/wikipedia/{piece}.png",
     });
 
     document.getElementById("reset").addEventListener("click", () => {

@@ -20,6 +20,7 @@ app.add_middleware(
 
 class MoveRequest(BaseModel):
     fen: str
+    moves: list[str] = []
 
 
 class MoveResponse(BaseModel):
@@ -41,10 +42,20 @@ def health():
 
 @app.post("/api/fly-move", response_model=MoveResponse)
 def fly_move(req: MoveRequest):
+    # Reconstruct the board by replaying the full move list (when given) so the
+    # brain has real game history: it needs the just-played move to encode
+    # "what just changed" and to detect true position repetition. Falling back
+    # to a bare FEN loses that history, which previously left the brain nearly
+    # blind to anything except the small, mostly-static board.
     try:
-        board = chess.Board(req.fen)
+        if req.moves:
+            board = chess.Board()
+            for uci in req.moves:
+                board.push_uci(uci)
+        else:
+            board = chess.Board(req.fen)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid FEN: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid move history/FEN: {e}")
 
     if board.is_game_over():
         raise HTTPException(status_code=400, detail="Game is already over")

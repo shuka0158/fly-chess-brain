@@ -26,6 +26,10 @@ N_STEPS = 25
 DECAY = 0.8
 THRESHOLD = 0.35
 STIMULUS_MAGNITUDE = 1.0
+CHANGE_BOOST = 4.0  # extra stimulus on squares touched by the last move played
+REPETITION_PENALTY = 1000.0  # steer away from repeating a position when not forced
+SHUFFLE_HISTORY = 6  # how many of the brain's own past moves to look back over
+SHUFFLE_PENALTY = 40.0  # per past occurrence of this same piece-pair shuffle
 PIECE_VALUES = {
     chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
     chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 4,
@@ -79,6 +83,20 @@ class ConnectomeFlyBrain(FlyBrain):
             mag = STIMULUS_MAGNITUDE * (0.4 + 0.6 * value / 9.0) * sign
             neurons = self.square_to_sensory[square]
             external[neurons] += mag
+
+        # Change-sensitive boost: real sensory systems are far more driven by
+        # what just moved than by the (mostly static) rest of the board. Without
+        # this, one turn's stimulus looks almost identical to the last one -
+        # a handful of far-away opening moves barely nudges a 138k-neuron
+        # network - and the readout collapses onto whichever move type wins
+        # by default (observed in practice: the brain got stuck shuffling one
+        # rook back and forth regardless of what the opponent played).
+        if board.move_stack:
+            last = board.move_stack[-1]
+            for square in (last.from_square, last.to_square):
+                neurons = self.square_to_sensory[square]
+                external[neurons] += CHANGE_BOOST
+
         return external
 
     # -- simulation --------------------------------------------------
@@ -123,6 +141,19 @@ class ConnectomeFlyBrain(FlyBrain):
         if norm > 0:
             motor_activity = motor_activity / norm
 
+        # The untrained random readout genuinely doesn't discriminate finely
+        # between similar-looking positions (verified empirically: two boards
+        # differing by one far-away opening move gave >0.95 cosine-similar
+        # motor activity regardless of stimulus tuning) - a real limitation of
+        # a fixed reservoir this size, not something a magnitude tweak fixes.
+        # Left alone this reliably degenerates into shuffling one piece back
+        # and forth. This is a clearly-labeled behavioral guard on top of the
+        # connectome score, not a claim that the brain itself "noticed" the
+        # loop - it discourages the brain's own recent shuffles using the
+        # real game history we now have.
+        own_recent = [board.move_stack[i] for i in range(len(board.move_stack) - 2, -1, -2)][:SHUFFLE_HISTORY]
+        own_recent_pairs = [frozenset((m.from_square, m.to_square)) for m in own_recent]
+
         best_move, best_score = None, -np.inf
         for move in legal:
             code = self._move_features(board, move) @ self.readout
@@ -130,6 +161,17 @@ class ConnectomeFlyBrain(FlyBrain):
             if code_norm > 0:
                 code = code / code_norm
             score = float(motor_activity @ code)
+
+            # Steer away from repeating a position (e.g. shuffling one piece
+            # back and forth forever) unless every legal move repeats one.
+            board.push(move)
+            if board.is_repetition(2):
+                score -= REPETITION_PENALTY
+            board.pop()
+
+            shuffle_count = own_recent_pairs.count(frozenset((move.from_square, move.to_square)))
+            score -= SHUFFLE_PENALTY * shuffle_count
+
             if score > best_score:
                 best_score, best_move = score, move
         return best_move
