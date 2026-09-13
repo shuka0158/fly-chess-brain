@@ -30,6 +30,7 @@ CHANGE_BOOST = 4.0  # extra stimulus on squares touched by the last move played
 REPETITION_PENALTY = 1000.0  # steer away from repeating a position when not forced
 SHUFFLE_HISTORY = 6  # how many of the brain's own past moves to look back over
 SHUFFLE_PENALTY = 40.0  # per past occurrence of this same piece-pair shuffle
+CAPTURE_WEIGHT = 0.5  # material-awareness term, see choose_move for why this exists
 PIECE_VALUES = {
     chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
     chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 4,
@@ -115,6 +116,14 @@ class ConnectomeFlyBrain(FlyBrain):
 
         return motor_accum
 
+    def _captured_value(self, board: chess.Board, move: chess.Move) -> float:
+        if not board.is_capture(move):
+            return 0.0
+        if board.is_en_passant(move):
+            return PIECE_VALUES[chess.PAWN]
+        captured = board.piece_at(move.to_square)
+        return PIECE_VALUES[captured.piece_type] if captured else 0.0
+
     # -- move scoring --------------------------------------------------
     def _move_features(self, board: chess.Board, move: chess.Move) -> np.ndarray:
         f = np.zeros(FEATURE_DIM, dtype=np.float32)
@@ -161,6 +170,14 @@ class ConnectomeFlyBrain(FlyBrain):
             if code_norm > 0:
                 code = code / code_norm
             score = float(motor_activity @ code)
+
+            # The random readout has no notion of material at all - "capture"
+            # is just one arbitrary feature bit in a random projection, not a
+            # weighted preference - so without this the brain never takes
+            # even a free queen (verified empirically). This is a deliberate,
+            # disclosed material-awareness term layered on top of the
+            # connectome score, not something the raw readout does on its own.
+            score += CAPTURE_WEIGHT * (self._captured_value(board, move) / 9.0)
 
             # Steer away from repeating a position (e.g. shuffling one piece
             # back and forth forever) unless every legal move repeats one.
