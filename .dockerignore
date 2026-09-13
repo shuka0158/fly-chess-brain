@@ -1,0 +1,8 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+data/*.feather
+data/*.tsv
+data/download_connections.log
+server.log

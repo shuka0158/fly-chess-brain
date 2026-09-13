@@ -1,0 +1,7 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-chess==1.999
+pandas==3.0.5
+pyarrow==25.0.1
+scipy==1.18.1
+numpy==2.5.3
