@@ -10,6 +10,11 @@ pinned: false
 
 # Chess vs. The Fly Brain
 
+**🪰 Live: [fly-chess-brain.onrender.com](https://fly-chess-brain.onrender.com)**
+(free-tier hosting — sleeps after ~15min idle, first move after a wake can be
+slow; expect ~15-45s per move even once warm, this is a genuinely heavy
+simulation on shared CPU, not a bug)
+
 Play chess against an opponent whose moves are chosen by real **DAN (reward)
 neuron** activity in a leaky integrate-and-fire (LIF) spiking simulation of
 the real FAFB fly connectome (139,255 proofread neurons, ~15M aggregated
