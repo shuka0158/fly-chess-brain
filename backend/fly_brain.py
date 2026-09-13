@@ -19,6 +19,24 @@ class FlyBrain:
     def choose_move(self, board: chess.Board) -> chess.Move:
         raise NotImplementedError
 
+    def think(self, board: chess.Board):
+        """Default streaming implementation for brains with no real internal
+        stages to report: just makes the move and yields one decision event."""
+        move = self.choose_move(board)
+        san = board.san(move)
+        board.push(move)
+        yield {
+            "stage": "decision",
+            "move_uci": move.uci(),
+            "move_san": san,
+            "fen_after": board.fen(),
+            "is_check": board.is_check(),
+            "is_checkmate": board.is_checkmate(),
+            "is_stalemate": board.is_stalemate(),
+            "is_game_over": board.is_game_over(),
+            "brain": self.name,
+        }
+
 
 class RandomFlyBrain(FlyBrain):
     """Temporary stand-in used until the real connectome engine is wired in.

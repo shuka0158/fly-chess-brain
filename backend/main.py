@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+
 import chess
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -40,8 +43,7 @@ def health():
     return {"status": "ok", "brain": brain.name}
 
 
-@app.post("/api/fly-move", response_model=MoveResponse)
-def fly_move(req: MoveRequest):
+def _build_board(req: MoveRequest) -> chess.Board:
     # Reconstruct the board by replaying the full move list (when given) so the
     # brain has real game history: it needs the just-played move to encode
     # "what just changed" and to detect true position repetition. Falling back
@@ -52,11 +54,15 @@ def fly_move(req: MoveRequest):
             board = chess.Board()
             for uci in req.moves:
                 board.push_uci(uci)
-        else:
-            board = chess.Board(req.fen)
+            return board
+        return chess.Board(req.fen)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid move history/FEN: {e}")
 
+
+@app.post("/api/fly-move", response_model=MoveResponse)
+def fly_move(req: MoveRequest):
+    board = _build_board(req)
     if board.is_game_over():
         raise HTTPException(status_code=400, detail="Game is already over")
 
@@ -75,6 +81,25 @@ def fly_move(req: MoveRequest):
         is_game_over=board.is_game_over(),
         brain=brain.name,
     )
+
+
+@app.post("/api/fly-move-stream")
+def fly_move_stream(req: MoveRequest):
+    """Same as /api/fly-move, but streams newline-delimited JSON progress
+    events live as the brain thinks (encoding, each LIF simulation step,
+    scored move candidates), ending with a 'decision' event carrying the
+    same fields as /api/fly-move's response."""
+    board = _build_board(req)
+    if board.is_game_over():
+        raise HTTPException(status_code=400, detail="Game is already over")
+
+    brain = get_active_brain()
+
+    def gen():
+        for event in brain.think(board):
+            yield json.dumps(event) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 # Serve the frontend

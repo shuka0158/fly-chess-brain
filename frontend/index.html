@@ -29,6 +29,29 @@
     padding: 6px 14px; font-size: 0.85rem; cursor: pointer;
   }
   button:hover { background: #3a3d4a; }
+
+  .panel h2 {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+    color: #7a7a90; margin: 0 0 8px 0; font-weight: 600;
+  }
+  #thinklog {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.78rem; color: #a9b6c9; max-height: 220px; overflow-y: auto;
+    line-height: 1.55; white-space: pre-wrap;
+  }
+  #thinklog .ev-encode { color: #c9a9f0; }
+  #thinklog .ev-sim { color: #6fbf73; }
+  #thinklog .ev-sim-live { color: #6fbf73; opacity: 0.75; }
+  #thinklog .ev-score { color: #f0b93a; }
+  #thinklog .ev-decision { color: #7dd3fc; font-weight: 600; }
+  #candidates { width: 100%; border-collapse: collapse; font-size: 0.78rem; margin-top: 6px; }
+  #candidates th, #candidates td {
+    text-align: right; padding: 2px 6px; border-bottom: 1px solid #262a35;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  #candidates th:first-child, #candidates td:first-child { text-align: left; }
+  #candidates tr.chosen { background: #1e2a3a; color: #7dd3fc; font-weight: 600; }
+  #candidates thead th { color: #7a7a90; font-weight: 500; }
 </style>
 </head>
 <body>
@@ -48,6 +71,15 @@
     <div class="status" id="status">Your move (White).</div>
     <div><button id="reset">New game</button></div>
     <div id="log"></div>
+  </div>
+
+  <div class="panel">
+    <h2>🧠 fly brain — live thinking</h2>
+    <div id="thinklog">Waiting for a move…</div>
+    <table id="candidates" hidden>
+      <thead><tr><th>move</th><th>connectome</th><th>capture</th><th>penalty</th><th>total</th></tr></thead>
+      <tbody></tbody>
+    </table>
   </div>
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
@@ -89,11 +121,79 @@
       return false;
     }
 
+    const thinklogEl = document.getElementById("thinklog");
+    const candidatesEl = document.getElementById("candidates");
+    let simProgressLine = null;
+
+    function think(msg, cls) {
+      const line = document.createElement("div");
+      if (cls) line.className = cls;
+      line.textContent = msg;
+      thinklogEl.appendChild(line);
+      thinklogEl.scrollTop = thinklogEl.scrollHeight;
+      return line;
+    }
+
+    function resetThinklog() {
+      thinklogEl.innerHTML = "";
+      candidatesEl.hidden = true;
+      candidatesEl.querySelector("tbody").innerHTML = "";
+      simProgressLine = null;
+    }
+
+    function renderCandidates(top, chosenUci) {
+      const tbody = candidatesEl.querySelector("tbody");
+      tbody.innerHTML = "";
+      for (const c of top) {
+        const tr = document.createElement("tr");
+        if (c.uci === chosenUci) tr.className = "chosen";
+        const penalty = -(c.repetition_penalty + c.shuffle_penalty);
+        tr.innerHTML = `<td>${c.san}</td><td>${c.connectome_score.toFixed(3)}</td>` +
+          `<td>${c.capture_bonus.toFixed(3)}</td><td>${penalty.toFixed(3)}</td><td>${c.total.toFixed(3)}</td>`;
+        tbody.appendChild(tr);
+      }
+      candidatesEl.hidden = false;
+    }
+
+    function handleThinkEvent(evt, onDecision) {
+      switch (evt.stage) {
+        case "encode":
+        case "encode_done":
+          think(evt.message, "ev-encode");
+          break;
+        case "sim_step":
+          if (!simProgressLine) simProgressLine = think("", "ev-sim-live");
+          simProgressLine.textContent =
+            `simulating step ${evt.step}/${evt.n_steps} — ${evt.neurons_firing} neurons firing (${evt.motor_firing} motor)`;
+          thinklogEl.scrollTop = thinklogEl.scrollHeight;
+          break;
+        case "sim_done":
+          if (simProgressLine) simProgressLine.className = "ev-sim";
+          think(evt.message, "ev-sim");
+          simProgressLine = null;
+          break;
+        case "scoring":
+          think(evt.message, "ev-score");
+          break;
+        case "candidates":
+          think(`top candidates (of all legal moves), best first:`, "ev-score");
+          renderCandidates(evt.top, null); // highlight added once we know the decision
+          window.__lastCandidates = evt.top;
+          break;
+        case "decision":
+          if (window.__lastCandidates) renderCandidates(window.__lastCandidates, evt.move_uci);
+          think(`→ played ${evt.move_san}`, "ev-decision");
+          onDecision(evt);
+          break;
+      }
+    }
+
     async function requestFlyMove() {
       setStatus("🪰 the fly is thinking&hellip;", "thinking");
+      resetThinklog();
       try {
         const moves = game.history({ verbose: true }).map(m => m.from + m.to + (m.promotion || ""));
-        const res = await fetch(API_BASE + "/api/fly-move", {
+        const res = await fetch(API_BASE + "/api/fly-move-stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ fen: game.fen(), moves }),
@@ -103,12 +203,28 @@
           setStatus("Error getting fly move: " + (err.detail || res.status));
           return;
         }
-        const data = await res.json();
-        game.move(data.move_uci, { sloppy: true });
-        board.position(game.fen());
-        log(`fly (${data.brain}) played ${data.move_san}`);
-        if (!checkGameOver()) {
-          setStatus(`Fly played <span class="brain-move">${data.move_san}</span>. Your move.`);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop(); // keep any incomplete trailing line
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const evt = JSON.parse(line);
+            handleThinkEvent(evt, (data) => {
+              game.move(data.move_uci, { sloppy: true });
+              board.position(game.fen());
+              log(`fly (${data.brain}) played ${data.move_san}`);
+              if (!checkGameOver()) {
+                setStatus(`Fly played <span class="brain-move">${data.move_san}</span>. Your move.`);
+              }
+            });
+          }
         }
       } catch (e) {
         setStatus("Network error contacting fly brain backend: " + e);
@@ -141,6 +257,8 @@
       game.reset();
       board.position("start");
       logEl.innerHTML = "";
+      resetThinklog();
+      thinklogEl.textContent = "Waiting for a move…";
       setStatus("Your move (White).");
     });
 
