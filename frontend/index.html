@@ -57,7 +57,21 @@
   }
   #candidates th:first-child, #candidates td:first-child { text-align: left; }
   #candidates tr.chosen { background: #1e2a3a; color: #7dd3fc; font-weight: 600; }
+  #candidates tbody tr { cursor: pointer; }
+  #candidates tbody tr:hover { background: #22262f; }
   #candidates thead th { color: #7a7a90; font-weight: 500; }
+  #candidateDetail {
+    margin-top: 8px; padding: 8px 10px; background: #14161d; border-radius: 6px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.74rem; color: #a9b6c9; line-height: 1.6;
+  }
+  #candidateDetail .detail-title { color: #e8e8ec; font-weight: 600; margin-bottom: 4px; }
+  #candidateDetail .reward { color: #6fbf73; }
+  #candidateDetail .punishment { color: #e07a7a; }
+  #candidateDetail .compartment-bar {
+    display: inline-block; height: 8px; background: currentColor; opacity: 0.5;
+    vertical-align: middle; margin-right: 4px; border-radius: 2px;
+  }
 
   /* move-option dots (chess.com style): small filled dot for a quiet move,
      hollow ring for a capture - appended as a child of the square div, which
@@ -110,6 +124,7 @@
           <thead><tr><th>move</th><th>valence</th><th>capture</th><th>penalty</th><th>total</th></tr></thead>
           <tbody></tbody>
         </table>
+        <div id="candidateDetail" hidden></div>
       </div>
     </div>
   </div>
@@ -199,7 +214,30 @@
       thinklogEl.innerHTML = "";
       candidatesEl.hidden = true;
       candidatesEl.querySelector("tbody").innerHTML = "";
+      candidateDetailEl.hidden = true;
       simProgressLine = null;
+    }
+
+    const candidateDetailEl = document.getElementById("candidateDetail");
+
+    function renderCandidateDetail(c) {
+      if (!c || !c.compartments) { candidateDetailEl.hidden = true; return; }
+      const maxSpikes = Math.max(1, ...c.compartments.map(x => x.spikes));
+      const compartmentRows = c.compartments.map(x => {
+        const cls = x.group === "reward" ? "reward" : "punishment";
+        const barWidth = Math.round((x.spikes / maxSpikes) * 60);
+        return `<div class="${cls}"><span class="compartment-bar" style="width:${barWidth}px"></span>` +
+          `${x.cell_type} (${x.group}): ${x.spikes} spikes</div>`;
+      }).join("");
+      const neuronRows = c.top_neurons.map(n =>
+        `<div class="${n.group === "reward" ? "reward" : "punishment"}">real neuron ${n.root_id} (${n.cell_type}): ${n.spikes} spikes</div>`
+      ).join("");
+      candidateDetailEl.innerHTML =
+        `<div class="detail-title">${c.san} — reward rate ${c.reward_rate}, punishment rate ${c.punishment_rate}, ` +
+        `motor activity ${c.motor_activity} (informational only, not used in scoring)</div>` +
+        `<div>by mushroom-body compartment:</div>${compartmentRows}` +
+        `<div style="margin-top:4px">top individual real DAN neurons:</div>${neuronRows}`;
+      candidateDetailEl.hidden = false;
     }
 
     function renderCandidates(top, chosenUci) {
@@ -211,6 +249,7 @@
         const penalty = -(c.repetition_penalty + c.shuffle_penalty);
         tr.innerHTML = `<td>${c.san}</td><td>${c.valence.toFixed(3)}</td>` +
           `<td>${c.capture_bonus.toFixed(3)}</td><td>${penalty.toFixed(3)}</td><td>${c.total.toFixed(3)}</td>`;
+        tr.addEventListener("click", () => renderCandidateDetail(c));
         tbody.appendChild(tr);
       }
       candidatesEl.hidden = false;
@@ -221,13 +260,15 @@
         case "present_options":
           think(evt.message, "ev-encode");
           break;
+        case "encode_done":
         case "simulate_batch":
           think(evt.message, "ev-encode");
           break;
         case "sim_step":
           if (!simProgressLine) simProgressLine = think("", "ev-sim-live");
           simProgressLine.textContent =
-            `step ${evt.step}/${evt.n_steps} — ${evt.total_firing} neurons firing across all candidates (${evt.reward_firing_total} in reward neurons)`;
+            `step ${evt.step}/${evt.n_steps} (${evt.step_ms}ms) — ${evt.total_firing} neurons firing across ` +
+            `all candidates (${evt.reward_firing_total} reward-neuron, ${evt.motor_firing_total} motor-neuron)`;
           thinklogEl.scrollTop = thinklogEl.scrollHeight;
           break;
         case "valence_done":
@@ -239,13 +280,14 @@
           think(evt.message, "ev-score");
           break;
         case "candidates":
-          think(`top candidates by reward-neuron valence + safety net, best first:`, "ev-score");
+          think(`top ${evt.top.length} of ${evt.total_legal_moves} legal moves by reward-vs-punishment ` +
+                `valence + safety net (click a row for the real-neuron breakdown):`, "ev-score");
           renderCandidates(evt.top, null); // highlight added once we know the decision
           window.__lastCandidates = evt.top;
           break;
         case "decision":
           if (window.__lastCandidates) renderCandidates(window.__lastCandidates, evt.move_uci);
-          think(`→ played ${evt.move_san}`, "ev-decision");
+          think(`→ played ${evt.move_san} (total thinking time: ${evt.total_elapsed_ms}ms)`, "ev-decision");
           onDecision(evt);
           break;
       }

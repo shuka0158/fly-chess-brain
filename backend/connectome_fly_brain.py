@@ -20,8 +20,10 @@ genuine neuroscience concept, not a coincidence of random numbers.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 import numpy as np
+import pandas as pd
 import scipy.sparse as sp
 import chess
 
@@ -68,6 +70,23 @@ class ConnectomeFlyBrain(FlyBrain):
         self.motor_idx = np.load(GRAPH_DIR / "motor_idx.npy")
         self.dan_idx = np.load(GRAPH_DIR / "dan_idx.npy")
         self.n = self.W.shape[0]
+
+        # Per-DAN-neuron identity, for breaking valence down by real
+        # mushroom-body compartment (PAM01-PAM15, PPL101-etc.) and individual
+        # real neuron instead of one opaque aggregate number. Of the 331 real
+        # DAN neurons, 307 are PAM cluster (reward-signaling) and 24 are PPL
+        # cluster (punishment/aversive-signaling) - real, distinct, opposite-
+        # valence populations in fly associative-learning neuroscience, not
+        # an assumption: this was discovered from the annotation data, not
+        # designed in (an earlier version of this app wrongly assumed "DAN"
+        # meant "all reward" from only checking the 15 most common types).
+        meta = pd.read_parquet(GRAPH_DIR / "neuron_meta.parquet")
+        self.dan_root_id = meta["root_id"].to_numpy()[self.dan_idx]
+        self.dan_cell_type = meta["cell_type"].fillna("?").to_numpy()[self.dan_idx]
+        self.dan_is_pam = np.array([ct.startswith("PAM") for ct in self.dan_cell_type])
+        self.dan_is_ppl = np.array([ct.startswith("PPL") for ct in self.dan_cell_type])
+        print(f"[fly-brain]   DAN split: {self.dan_is_pam.sum()} PAM (reward), "
+              f"{self.dan_is_ppl.sum()} PPL (punishment/aversive)")
 
         # Fixed, deterministic mapping: each of the 64 board squares gets its
         # own cluster of sensory neurons to stimulate (arbitrary but stable -
@@ -135,17 +154,45 @@ class ConnectomeFlyBrain(FlyBrain):
             "shuffle_penalty": round(shuffle_penalty, 4),
         }
 
+    def _dan_breakdown(self, dan_spikes_for_move: np.ndarray) -> dict:
+        """Per-real-mushroom-body-compartment and per-individual-real-neuron
+        detail for one candidate's DAN response, instead of one opaque sum."""
+        by_type: dict[str, int] = {}
+        for ct, s in zip(self.dan_cell_type, dan_spikes_for_move):
+            if s <= 0:
+                continue
+            by_type[ct] = by_type.get(ct, 0) + int(s)
+        compartments = sorted(
+            [{"cell_type": ct, "spikes": s, "group": "reward" if ct.startswith("PAM") else "punishment"}
+             for ct, s in by_type.items()],
+            key=lambda r: -r["spikes"],
+        )
+        top_neuron_order = np.argsort(-dan_spikes_for_move)[:5]
+        top_neurons = [
+            {"root_id": int(self.dan_root_id[j]), "cell_type": self.dan_cell_type[j],
+             "spikes": int(dan_spikes_for_move[j]),
+             "group": "reward" if self.dan_cell_type[j].startswith("PAM") else "punishment"}
+            for j in top_neuron_order if dan_spikes_for_move[j] > 0
+        ]
+        return {"compartments": compartments, "top_neurons": top_neurons}
+
     # -- core: present every legal move's resulting position, batched ----
     def think(self, board: chess.Board):
+        t_start = time.perf_counter()
+
+        def elapsed_ms() -> int:
+            return int((time.perf_counter() - t_start) * 1000)
+
         legal = list(board.legal_moves)
         if not legal:
             raise ValueError("No legal moves available")
 
         mover_color = board.turn  # the fly's own color - fixed perspective for all candidates
-        yield {"stage": "present_options",
+        yield {"stage": "present_options", "elapsed_ms": elapsed_ms(),
                "message": f"Presenting {len(legal)} candidate futures (the board after each legal "
                           f"move) to {len(self.dan_idx)} real reward-signaling (DAN) neurons at once."}
 
+        t_encode = time.perf_counter()
         external_cols = []
         for move in legal:
             board.push(move)
@@ -153,50 +200,89 @@ class ConnectomeFlyBrain(FlyBrain):
             board.pop()
         external_matrix = np.stack(external_cols, axis=1)  # (n, M)
         M = len(legal)
+        yield {"stage": "encode_done", "elapsed_ms": elapsed_ms(),
+               "message": f"Encoded {M} candidate boards in {int((time.perf_counter()-t_encode)*1000)}ms."}
 
-        yield {"stage": "simulate_batch",
+        yield {"stage": "simulate_batch", "elapsed_ms": elapsed_ms(),
                "message": f"Running a {N_STEPS}-step spiking simulation across all {M} candidates "
-                          f"in parallel over the real synaptic wiring..."}
+                          f"in parallel over the real synaptic wiring ({self.W.nnz:,} synapses)..."}
 
+        t_sim = time.perf_counter()
         v = np.zeros((self.n, M), dtype=np.float32)
         spikes = np.zeros((self.n, M), dtype=np.float32)
-        dan_accum = np.zeros(M, dtype=np.float32)
+        dan_spike_matrix = np.zeros((len(self.dan_idx), M), dtype=np.float32)
+        motor_accum = np.zeros(M, dtype=np.float32)
         for step in range(N_STEPS):
+            t_step = time.perf_counter()
             input_current = self.W @ spikes + external_matrix
             v = DECAY * v + input_current
             fired = v >= THRESHOLD
             v = np.where(fired, 0.0, v)
             spikes = fired.astype(np.float32)
-            dan_accum += spikes[self.dan_idx, :].sum(axis=0)
+            dan_spike_matrix += spikes[self.dan_idx, :]
+            motor_accum += spikes[self.motor_idx, :].sum(axis=0)
             yield {"stage": "sim_step", "step": step + 1, "n_steps": N_STEPS,
+                   "elapsed_ms": elapsed_ms(), "step_ms": int((time.perf_counter() - t_step) * 1000),
                    "total_firing": int(spikes.sum()),
-                   "reward_firing_total": int(spikes[self.dan_idx, :].sum())}
+                   "reward_firing_total": int(spikes[self.dan_idx, :].sum()),
+                   "motor_firing_total": int(spikes[self.motor_idx, :].sum())}
 
-        yield {"stage": "valence_done",
-               "message": f"Reward-neuron response computed for all {M} candidates "
+        dan_accum = dan_spike_matrix.sum(axis=0)
+        yield {"stage": "valence_done", "elapsed_ms": elapsed_ms(),
+               "message": f"Simulation done in {int((time.perf_counter()-t_sim)*1000)}ms. "
+                          f"Reward-neuron response computed for all {M} candidates "
                           f"(range {int(dan_accum.min())}-{int(dan_accum.max())} spikes)."}
 
-        yield {"stage": "scoring", "message": "Combining real reward-neuron valence with material safety net..."}
+        yield {"stage": "scoring", "elapsed_ms": elapsed_ms(),
+               "message": "Combining real reward-vs-punishment neuron valence with material safety net..."}
         own_recent = [board.move_stack[i] for i in range(len(board.move_stack) - 2, -1, -2)][:SHUFFLE_HISTORY]
         own_recent_pairs = [frozenset((m.from_square, m.to_square)) for m in own_recent]
 
-        # Normalize valence to a comparable scale to the safety-net terms.
-        max_possible = N_STEPS * max(len(self.dan_idx), 1)
+        # Net valence = mean firing rate of real reward (PAM) neurons minus
+        # mean firing rate of real punishment/aversive (PPL) neurons, each
+        # normalized by their own population size so the much-smaller PPL
+        # group (24 neurons) is compared fairly against PAM (307 neurons)
+        # rather than being swamped by raw count. This is the actual
+        # biological contrast (approach vs. avoidance teaching signal), not
+        # just "more dopaminergic activity is automatically better."
+        pam_rate = dan_spike_matrix[self.dan_is_pam, :].mean(axis=0) / N_STEPS
+        ppl_rate = dan_spike_matrix[self.dan_is_ppl, :].mean(axis=0) / N_STEPS
+        net_valence = pam_rate - ppl_rate  # roughly in [-1, 1]
+
+        max_motor_possible = N_STEPS * max(len(self.motor_idx), 1)
         scored = []
         for i, move in enumerate(legal):
-            valence = float(dan_accum[i]) / max_possible  # in [0, 1]
+            valence = float(net_valence[i])
             net = self._safety_net(board, move, own_recent_pairs)
             total = valence + net["capture_bonus"] - net["repetition_penalty"] - net["shuffle_penalty"]
             scored.append({
                 "uci": move.uci(),
                 "san": board.san(move),
                 "reward_spikes": int(dan_accum[i]),
+                "reward_rate": round(float(pam_rate[i]), 4),
+                "punishment_rate": round(float(ppl_rate[i]), 4),
                 "valence": round(valence, 4),
+                # Real descending/motor neuron activity for this candidate -
+                # informational only, not used in scoring (this app doesn't
+                # simulate an actual body for the fly to move), but it's real
+                # data we already have loaded, so it's surfaced rather than
+                # thrown away.
+                "motor_activity": round(float(motor_accum[i]) / max_motor_possible, 4),
                 **net,
                 "total": round(total, 4),
+                "_i": i,
             })
         scored.sort(key=lambda r: -r["total"])
-        yield {"stage": "candidates", "top": scored[:6]}
+
+        # Only compute the (slightly heavier) per-compartment/per-neuron
+        # breakdown for the candidates we'll actually display.
+        SHOWN = min(len(scored), 12)
+        for r in scored[:SHOWN]:
+            r.update(self._dan_breakdown(dan_spike_matrix[:, r.pop("_i")]))
+        for r in scored[SHOWN:]:
+            r.pop("_i", None)
+        yield {"stage": "candidates", "elapsed_ms": elapsed_ms(), "top": scored[:SHOWN],
+               "total_legal_moves": len(scored)}
 
         best = scored[0]
         move = chess.Move.from_uci(best["uci"])
@@ -213,6 +299,7 @@ class ConnectomeFlyBrain(FlyBrain):
             "is_game_over": board.is_game_over(),
             "brain": self.name,
             "score_breakdown": best,
+            "total_elapsed_ms": elapsed_ms(),
         }
 
     def choose_move(self, board: chess.Board) -> chess.Move:

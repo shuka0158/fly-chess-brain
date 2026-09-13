@@ -7,14 +7,17 @@ synaptic weights, from [FlyWire/Codex](https://codex.flywire.ai/?dataset=fafb)).
 
 **What this is, honestly:** a fruit fly cannot reason about chess. This
 engine shows the brain the resulting board of every legal move and reads out
-activity from its real **PAM-cluster dopaminergic neurons** — the fly's
-actual reward/valence teaching-signal cells, extensively studied in real
-associative-learning neuroscience (they're the reward half of the circuit
-that lets flies learn "this smell means food"). The move whose resulting
-position produces the most reward-neuron activity is played. This is a
-genuine, named biological concept — not an arbitrary formula — but there is
-still no training signal that could ever make real reward neurons "know"
-chess is good to win, so don't expect strong play.
+activity from its real DAN (dopaminergic) neurons — of the 331 real DAN
+neurons in this connectome, 307 are **PAM cluster** (reward-signaling) and 24
+are **PPL cluster** (punishment/aversive-signaling): two real, distinct,
+opposite-valence populations from actual fly associative-learning
+neuroscience (PAM reinforces approach, PPL1 reinforces avoidance). Net
+valence = mean PAM firing rate minus mean PPL firing rate. The move whose
+resulting position produces the most net-positive reward-vs-punishment
+response is played. This is a genuine, named biological concept — not an
+arbitrary formula — but there is still no training signal that could ever
+make real reward/punishment neurons "know" chess is good to win, so don't
+expect strong play.
 
 ## How the fly picks a move
 
@@ -29,16 +32,21 @@ chess is good to win, so don't expect strong play.
    through the real synaptic weight matrix for 12 steps of LIF dynamics.
    Excitatory/inhibitory sign per edge comes from real predicted
    neurotransmitter probabilities.
-3. **Read real reward-neuron activity**: sum spikes at the real DAN
-   (dopaminergic, PAM-cluster) population for each candidate's simulation —
-   this is the fly's actual reward circuitry's response to that outcome.
-4. **Score**: valence (normalized reward-neuron spike count) plus a small,
-   disclosed safety net — material-awareness (the raw valence signal has no
-   inherent notion of piece value) and anti-repetition/anti-shuffle guards
-   (the valence signal doesn't reliably discriminate between very
-   similar-looking positions on its own; left alone this degenerates into
-   shuffling one piece back and forth). The highest-scoring legal move is
-   played.
+3. **Read real reward-vs-punishment activity**: for each candidate, take the
+   mean firing rate of the real PAM (reward) neurons minus the mean firing
+   rate of the real PPL (punishment/aversive) neurons - this is the fly's
+   actual approach/avoidance teaching-signal response to that outcome.
+4. **Score**: that net valence plus a small, disclosed safety net -
+   material-awareness (the raw valence signal has no inherent notion of
+   piece value) and anti-repetition/anti-shuffle guards (the valence signal
+   doesn't reliably discriminate between very similar-looking positions on
+   its own; left alone this degenerates into shuffling one piece back and
+   forth). The highest-scoring legal move is played.
+
+The live-thinking panel also exposes, per candidate: the breakdown by real
+mushroom-body compartment (e.g. PAM08, PPL101), the individual real neurons
+(actual root IDs) that fired most, informational real descending/motor
+neuron activity (not used in scoring), and per-stage timing.
 
 ## Running it
 
