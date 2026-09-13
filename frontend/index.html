@@ -15,9 +15,15 @@
   }
   h1 { font-size: 1.4rem; margin: 0; text-align: center; }
   .subtitle { color: #9a9ab0; font-size: 0.85rem; text-align: center; max-width: 520px; }
-  #board { width: min(90vw, 480px); }
+  .layout {
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start;
+    gap: 16px; width: 100%; max-width: 1000px;
+  }
+  .col-board { flex: 0 0 auto; width: min(90vw, 480px); display: flex; flex-direction: column; gap: 16px; }
+  .col-think { flex: 1 1 320px; min-width: min(90vw, 320px); max-width: 480px; }
+  #board { width: 100%; }
   .panel {
-    width: min(90vw, 480px); background: #1b1e27; border: 1px solid #2c2f3a;
+    width: 100%; background: #1b1e27; border: 1px solid #2c2f3a;
     border-radius: 10px; padding: 14px 18px; box-sizing: border-box;
   }
   .status { font-size: 0.95rem; margin-bottom: 8px; min-height: 1.3em; }
@@ -65,21 +71,26 @@
     reasoning — it's an honest novelty engine driven by a real fly's real wiring.
   </p>
 
-  <div id="board"></div>
+  <div class="layout">
+    <div class="col-board">
+      <div id="board"></div>
+      <div class="panel">
+        <div class="status" id="status">Your move (White).</div>
+        <div><button id="reset">New game</button></div>
+        <div id="log"></div>
+      </div>
+    </div>
 
-  <div class="panel">
-    <div class="status" id="status">Your move (White).</div>
-    <div><button id="reset">New game</button></div>
-    <div id="log"></div>
-  </div>
-
-  <div class="panel">
-    <h2>🧠 fly brain — live thinking</h2>
-    <div id="thinklog">Waiting for a move…</div>
-    <table id="candidates" hidden>
-      <thead><tr><th>move</th><th>connectome</th><th>capture</th><th>penalty</th><th>total</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="col-think">
+      <div class="panel">
+        <h2>🧠 fly brain — live thinking</h2>
+        <div id="thinklog">Waiting for a move…</div>
+        <table id="candidates" hidden>
+          <thead><tr><th>move</th><th>connectome</th><th>capture</th><th>penalty</th><th>total</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
